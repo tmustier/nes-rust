@@ -14,7 +14,8 @@ pub mod default_input;
 pub mod default_audio;
 pub mod default_display;
 
-use cpu::Cpu;
+use cpu::{Cpu, CpuDebugState};
+use mapper::MapperDebugState;
 use rom::Rom;
 use button::Button;
 use input::Input;
@@ -48,7 +49,7 @@ use audio::Audio;
 ///
 /// // Go!
 /// nes.bootup();
-/// let mut rgba_pixels = [0; 256 * 240 * 4];
+/// let mut rgba_pixels = [256 * 240 * 4];
 /// loop {
 ///   nes.step_frame();
 ///   nes.copy_pixels(rgba_pixels);
@@ -60,6 +61,11 @@ use audio::Audio;
 /// ```
 pub struct Nes {
 	cpu: Cpu
+}
+
+pub struct NesDebugState {
+	pub cpu: CpuDebugState,
+	pub mapper: MapperDebugState,
 }
 
 impl Nes {
@@ -146,8 +152,30 @@ impl Nes {
 		self.cpu.get_mut_input().release(button);
 	}
 
-	/// Checks if NES console is powered on
-	pub fn is_power_on(&self) -> bool {
-		self.cpu.is_power_on()
+	pub fn has_battery_backed_ram(&self) -> bool {
+		self.cpu.has_battery_backed_ram()
+	}
+
+	pub fn get_sram(&self) -> Vec<u8> {
+		self.cpu.get_sram()
+	}
+
+	pub fn set_sram(&mut self, data: Vec<u8>) {
+		self.cpu.set_sram(&data);
+	}
+
+	pub fn is_sram_dirty(&self) -> bool {
+		self.cpu.is_sram_dirty()
+	}
+
+	pub fn mark_sram_saved(&mut self) {
+		self.cpu.mark_sram_saved();
+	}
+
+	pub fn debug_state(&self) -> NesDebugState {
+		NesDebugState {
+			cpu: self.cpu.debug_state(),
+			mapper: self.cpu.mapper_debug_state(),
+		}
 	}
 }

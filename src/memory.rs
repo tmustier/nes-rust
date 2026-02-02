@@ -24,6 +24,14 @@ impl Memory {
 	pub fn store(&mut self, address: u32, value: u8) {
 		self.data[address as usize] = value;
 	}
+
+	pub fn as_slice(&self) -> &[u8] {
+		&self.data
+	}
+
+	pub fn as_mut_slice(&mut self) -> &mut [u8] {
+		&mut self.data
+	}
 }
 
 #[cfg(test)]

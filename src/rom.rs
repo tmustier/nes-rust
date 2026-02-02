@@ -1,9 +1,10 @@
 use memory::Memory;
-use mapper::{Mapper, MapperFactory};
+use mapper::{Mapper, MapperFactory, MapperDebugState};
 
 pub struct Rom {
 	header: RomHeader,
 	memory: Memory,
+	chr_ram: Option<Memory>,
 	mapper: Box<dyn Mapper>
 }
 
@@ -20,9 +21,20 @@ impl Rom {
 	pub fn new(data: Vec<u8>) -> Self {
 		let header = RomHeader::new(data[0..HEADER_SIZE].to_vec());
 		let mapper = MapperFactory::create(&header);
+		let data_start = HEADER_SIZE + if header.has_trainer() { 512 } else { 0 };
+		let rom_data = if data.len() > data_start {
+			data[data_start..].to_vec()
+		} else {
+			Vec::new()
+		};
+		let chr_ram = match header.chr_ram_size_bytes() {
+			0 => None,
+			size => Some(Memory::new(vec![0; size])),
+		};
 		Rom {
 			header: header,
-			memory: Memory::new(data[HEADER_SIZE..].to_vec()),
+			memory: Memory::new(rom_data),
+			chr_ram,
 			mapper: mapper
 		}
 	}
@@ -37,19 +49,61 @@ impl Rom {
 	 * In general writing control registers in Mapper via .store() switches bank.
 	 */
 	pub fn load(&self, address: u32) -> u8 {
-		let mut address_in_rom = 0 as u32;
 		if address < 0x2000 {
-			// load from character rom
-			address_in_rom += self.header.prg_rom_bank_num() as u32 * 0x4000;
-			address_in_rom += self.mapper.map_for_chr_rom(address);
-		} else {
-			address_in_rom += self.mapper.map(address);
+			return self.load_chr(address);
 		}
-		self.memory.load(address_in_rom)
+		self.memory.load(self.mapper.map(address))
+	}
+
+	pub fn load_chr(&self, address: u32) -> u8 {
+		let mapped = self.map_chr_address(address);
+		if let Some(chr_ram) = &self.chr_ram {
+			return chr_ram.load(mapped);
+		}
+		let offset = self.prg_rom_size() + mapped;
+		self.memory.load(offset)
+	}
+
+	pub fn store_chr(&mut self, address: u32, value: u8) {
+		let size = match self.chr_ram.as_ref() {
+			Some(ram) => ram.capacity(),
+			None => return,
+		};
+		if size == 0 {
+			return;
+		}
+		let mapped = self.mapper.map_for_chr_rom(address) % size;
+		if let Some(chr_ram) = self.chr_ram.as_mut() {
+			chr_ram.store(mapped, value);
+		}
 	}
 
 	pub fn load_without_mapping(&self, address: u32) -> u8 {
 		self.memory.load(address)
+	}
+
+	fn prg_rom_size(&self) -> u32 {
+		self.header.prg_rom_bank_num() as u32 * 0x4000
+	}
+
+	fn chr_rom_size(&self) -> u32 {
+		self.header.chr_rom_bank_num() as u32 * 0x2000
+	}
+
+	fn chr_ram_size(&self) -> u32 {
+		self.chr_ram.as_ref().map_or(0, |ram| ram.capacity())
+	}
+
+	fn map_chr_address(&self, address: u32) -> u32 {
+		let size = if self.chr_ram.is_some() {
+			self.chr_ram_size()
+		} else {
+			self.chr_rom_size()
+		};
+		if size == 0 {
+			return 0;
+		}
+		self.mapper.map_for_chr_rom(address) % size
 	}
 
 	/**
@@ -67,11 +121,19 @@ impl Rom {
 		self.header.has_chr_rom()
 	}
 
+	pub fn has_battery_backed_ram(&self) -> bool {
+		self.header.has_battery_backed_ram()
+	}
+
 	pub fn mirroring_type(&self) -> Mirrorings {
 		match self.mapper.has_mirroring_type() {
 			true => self.mapper.mirroring_type(),
 			false => self.header.mirroring_type()
 		}
+	}
+
+	pub fn mapper_debug_state(&self) -> MapperDebugState {
+		self.mapper.debug_state()
 	}
 
 	// @TODO: MMC3Mapper specific. Should this method be here?
@@ -131,6 +193,13 @@ impl RomHeader {
 		self.chr_rom_bank_num() > 0
 	}
 
+	fn chr_ram_size_bytes(&self) -> usize {
+		if self.has_chr_rom() {
+			return 0;
+		}
+		0x2000
+	}
+
 	fn control_byte1(&self) -> u8 {
 		self.load(6)
 	}
@@ -172,12 +241,12 @@ impl RomHeader {
 		}
 	}
 
-	fn _battery_backed_ram(&self) -> u8 {
-		self.extract_bits(self.control_byte1(), 1, 1)
+	pub fn has_battery_backed_ram(&self) -> bool {
+		self.extract_bits(self.control_byte1(), 1, 1) == 1
 	}
 
-	fn _trainer_512_bytes(&self) -> u8 {
-		self.extract_bits(self.control_byte1(), 2, 1)
+	pub fn has_trainer(&self) -> bool {
+		self.extract_bits(self.control_byte1(), 2, 1) == 1
 	}
 
 	fn four_screen_mirroring(&self) -> bool {

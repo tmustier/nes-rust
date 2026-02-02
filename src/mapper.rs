@@ -3,6 +3,18 @@ use rom::Mirrorings;
 use rom::RomHeader;
 use register::Register;
 
+#[derive(Clone, Copy, Default)]
+pub struct MapperDebugState {
+	pub mapper_num: u8,
+	pub control: u8,
+	pub prg: u8,
+	pub chr0: u8,
+	pub chr1: u8,
+	pub prg_mode: u8,
+	pub chr_mode: u8,
+	pub outer_prg: u8,
+}
+
 impl MapperFactory {
 	pub fn create(header: &RomHeader) -> Box<dyn Mapper> {
 		match header.mapper_num() {
@@ -32,6 +44,10 @@ pub trait Mapper {
 
 	// @TODO: MMC3Mapper specific. Should this method be here?
 	fn drive_irq_counter(&mut self) -> bool;
+
+	fn debug_state(&self) -> MapperDebugState {
+		MapperDebugState::default()
+	}
 }
 
 pub struct NRomMapper {
@@ -118,30 +134,39 @@ impl Mapper for MMC1Mapper {
 	fn map(&self, address: u32) -> u32 {
 		let bank: u32;
 		let mut offset = address & 0x3FFF;
-		let bank_num = self.prg_bank_register.load() as u32 & 0x0F;
+		let prg_low = (self.prg_bank_register.load() as u32) & 0x0F;
+		let prg_high = if self.program_bank_num > 16 {
+			((self.chr_bank0_register.load() as u32) & 0x10) >> 4
+		} else {
+			0
+		};
+		let outer_offset = prg_high * 0x10;
+		let bank_num = prg_low;
 
 		match self.control_register.load_bits(2, 2) {
 			0 | 1 => {
 				// switch 32KB at 0x8000, ignoring low bit of bank number
 				// TODO: Fix me
 				offset = offset | (address & 0x4000);
-				bank = bank_num & 0x0E;
+				bank = outer_offset + (bank_num & 0x1E);
 			},
 			2 => {
 				// fix first bank at 0x8000 and switch 16KB bank at 0xC000
 				bank = match address < 0xC000 {
-					true => 0,
-					false => bank_num
+					true => outer_offset,
+					false => outer_offset + bank_num
 				};
 			},
 			_ /*3*/ => {
 				// fix last bank at 0xC000 and switch 16KB bank at 0x8000
 				bank = match address >= 0xC000 {
-					true => self.program_bank_num as u32 - 1,
-					false => bank_num
+					true => outer_offset + 0x0F,
+					false => outer_offset + bank_num
 				};
 			}
 		};
+		let max_bank = self.program_bank_num as u32;
+		let bank = if max_bank > 0 { bank % max_bank } else { bank };
 		bank * 0x4000 + offset
 	}
 
@@ -167,23 +192,40 @@ impl Mapper for MMC1Mapper {
 			self.register_write_count = 0;
 			self.latch.clear();
 			if (address & 0x6000) == 0 {
-				self.control_register.store_bits(2, 2, 3);
+				self.control_register.store(0x0C);
 			}
-		} else {
-			self.latch.store(((value & 1) << 4) | (self.latch.load() >> 1));
-			self.register_write_count += 1;
+			return;
+		}
+		self.latch.store(((value & 1) << 4) | (self.latch.load() >> 1));
+		self.register_write_count += 1;
 
-			if self.register_write_count >= 5 {
-				let val = self.latch.load();
-				match address & 0x6000 {
-					0x0000 => self.control_register.store(val),
-					0x2000 => self.chr_bank0_register.store(val),
-					0x4000 => self.chr_bank1_register.store(val),
-					_ /*0x6000*/ => self.prg_bank_register.store(val)
-				};
-				self.register_write_count = 0;
-				self.latch.clear();
-			}
+		if self.register_write_count >= 5 {
+			let val = self.latch.load();
+			match address & 0x6000 {
+				0x0000 => self.control_register.store(val),
+				0x2000 => self.chr_bank0_register.store(val),
+				0x4000 => self.chr_bank1_register.store(val),
+				_ /*0x6000*/ => self.prg_bank_register.store(val)
+			};
+			self.register_write_count = 0;
+			self.latch.clear();
+		}
+	}
+
+	fn debug_state(&self) -> MapperDebugState {
+		MapperDebugState {
+			mapper_num: 1,
+			control: self.control_register.load(),
+			prg: self.prg_bank_register.load(),
+			chr0: self.chr_bank0_register.load(),
+			chr1: self.chr_bank1_register.load(),
+			prg_mode: self.control_register.load_bits(2, 2),
+			chr_mode: self.control_register.load_bit(4),
+			outer_prg: if self.program_bank_num > 16 {
+				(self.chr_bank0_register.load() >> 4) & 1
+			} else {
+				0
+			},
 		}
 	}
 

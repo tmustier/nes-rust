@@ -271,6 +271,7 @@ impl Ppu {
 			// ppustatus load
 			0x2002 => {
 				let value = self.ppustatus.load();
+				let was_vblank = (value & 0x80) != 0;
 
 				// clear vblank after reading 0x2002
 				self.ppustatus.clear_vblank();
@@ -287,10 +288,9 @@ impl Ppu {
 				// clears the flag, and won't fire NMI
 
 				// Note: update_flags() which can set vblank is called
-				// after this method in the same cycle, so set supress_vblank true
-				// even at cycle=1 not only cycle=0
-
-				if self.scanline == 241 && (self.cycle == 0 || self.cycle == 1) {
+				// after this method in the same cycle. Only suppress if
+				// vblank was already set when read.
+				if was_vblank && self.scanline == 241 && self.cycle == 1 {
 					self.suppress_vblank = true;
 				}
 
@@ -438,22 +438,22 @@ impl Ppu {
 		// 0x0000 - 0x1FFF is mapped with cartridge's CHR-ROM if exists.
 		// Otherwise load from VRAM.
 
-		match address < 0x2000 && rom.has_chr_rom() {
-			true => rom.load(address as u32),
-			false => self.vram.load(self.convert_vram_address(address, rom) as u32)
+		if address < 0x2000 {
+			return rom.load_chr(address as u32);
 		}
+		self.vram.load(self.convert_vram_address(address, rom) as u32)
 	}
 
 	fn store(&mut self, mut address: u16, value: u8, rom: &mut Rom) {
 		address = address & 0x3FFF;  // just in case
 
-		// 0x0000 - 0x1FFF is mapped with cartridge's CHR-ROM if exists.
-		// Otherwise store to VRAM.
+		// 0x0000 - 0x1FFF is mapped with cartridge CHR (ROM or RAM).
 
-		match address < 0x2000 && rom.has_chr_rom() {
-			true => rom.store(address as u32, value),
-			false => self.vram.store(self.convert_vram_address(address, rom) as u32, value)
-		};
+		if address < 0x2000 {
+			rom.store_chr(address as u32, value);
+			return;
+		}
+		self.vram.store(self.convert_vram_address(address, rom) as u32, value);
 	}
 
 	fn convert_vram_address(&self, address: u16, rom: &Rom) -> u16 {
@@ -735,9 +735,13 @@ impl Ppu {
 	fn update_flags(&mut self, rom: &mut Rom) {
 		if self.cycle == 1 {
 			if self.scanline == 241 {
-				// set vblank and occur NMI at cycle 1 in scanline 241
+				// Set vblank and latch NMI at cycle 1 in scanline 241.
+				// NMI delivery is still delayed by CPU instruction timing.
 				if !self.suppress_vblank {
 					self.ppustatus.set_vblank();
+					if self.ppuctrl.is_nmi_enabled() {
+						self.nmi_interrupted = true;
+					}
 				}
 				self.suppress_vblank = false;
 				// Pixels for this frame should be ready so update the display
@@ -748,41 +752,6 @@ impl Ppu {
 				self.ppustatus.clear_vblank();
 				self.ppustatus.clear_zero_hit();
 				self.ppustatus.clear_overflow();
-			}
-		}
-
-		// According to http://wiki.nesdev.com/w/index.php/PPU_frame_timing#VBL_Flag_Timing
-		// reading 0x2002 at cycle=2 and scanline=241 can suppress NMI
-		// so firing NMI at some cycles away not at cycle=1 so far
-
-		// There is a chance that CPU 0x2002 read gets the data vblank flag set
-		// before CPU starts NMI interrupt routine.
-		// CPU instructions take multiple CPU clocks to complete.
-		// If CPU starts an operation of an istruction including 0x2002 read right before
-		// PPU sets vblank flag and fires NMI,
-		// the 0x2002 read gets the data with vblank flag set even before
-		// CPU starts NMI routine.
-		//
-		//    CPU                              PPU
-		// 1. instruction operation start
-		// 2.   - doing something              vblank start and fire NMI
-		// 3.   - read 0x2002 with
-		//        vblank flag set
-		// 4.   - doing something
-		// 5. Notice NMI and start
-		//    NMI routine
-		//
-		// It seems some games rely on this behavior.
-		// To simulate this behavior we fire NMI at cycle=20 so far.
-		// If CPU reads 0x2002 between PPU cycle 3~20 it gets data
-		// vblank flag set before NMI routine.
-		// (reading at cycle 1~2 suppresses NMI, see load_register())
-		// @TODO: Safer and more appropriate approach.
-
-		if self.cycle == 20 && self.scanline == 241 {
-			if self.ppustatus.is_vblank() &&
-				self.ppuctrl.is_nmi_enabled() {
-				self.nmi_interrupted = true;
 			}
 		}
 
@@ -901,7 +870,7 @@ impl Ppu {
 		// the PPU scans through OAM to determine which sprites
 		// to render on the next scanline
 
-		if self.scanline >= 240 {
+		if self.scanline >= 240 && self.scanline != 261 {
 			return;
 		}
 
@@ -917,16 +886,17 @@ impl Ppu {
 		} else if self.cycle == 257 {
 			// Evaluate at a time at cycle 257 due to performance
 			// and simplicity so far
-			self.process_sprite_pixels(rom);
+			let next_scanline = if self.scanline == 261 { 0 } else { self.scanline + 1 };
+			self.process_sprite_pixels(next_scanline, rom);
 		}
 	}
 
-	fn process_sprite_pixels(&mut self, rom: &Rom) {
+	fn process_sprite_pixels(&mut self, scanline: u16, rom: &Rom) {
 		for i in 0..self.sprite_availables.len() {
 			self.sprite_availables[i] = false;
 		}
 
-		let y = self.scanline as u8;
+		let y = scanline as u8;
 		let height = self.ppuctrl.sprite_height();
 		let mut n = 0;
 
@@ -1365,14 +1335,18 @@ impl Sprite {
 	}
 
 	fn on(&self, y: u8, height: u8) -> bool {
-		(y >= self.get_y()) && (y < self.get_y() + height)
+		let sprite_y = self.get_y() as u16 + 1;
+		let y = y as u16;
+		y >= sprite_y && y < sprite_y + height as u16
 	}
 
 	fn get_y_in_sprite(&self, y: u8, height: u8) -> u8 {
 		// Assumes self.on(y, height) is true
+		let sprite_y = self.get_y() as u16 + 1;
+		let delta = (y as u16 - sprite_y) as u8;
 		match self.vertical_flip() {
-			true => height - 1 - (y - self.get_y()),
-			false => y - self.get_y()
+			true => height - 1 - delta,
+			false => delta
 		}
 	}
 }

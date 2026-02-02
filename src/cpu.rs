@@ -10,6 +10,21 @@ use input::Input;
 use display::Display;
 use audio::Audio;
 
+const SRAM_START: usize = 0x6000;
+const SRAM_END: usize = 0x8000;
+const SRAM_SIZE: usize = SRAM_END - SRAM_START;
+
+pub struct CpuDebugState {
+	pub pc: u16,
+	pub a: u8,
+	pub x: u8,
+	pub y: u8,
+	pub sp: u8,
+	pub p: u8,
+	pub last_pc: u16,
+	pub last_opcode: u8,
+}
+
 fn to_joypad_button(button: button::Button) -> joypad::Button {
 	match button {
 		button::Button::Joypad1A |
@@ -35,8 +50,6 @@ fn to_joypad_button(button: button::Button) -> joypad::Button {
  * Refer to https://wiki.nesdev.com/w/index.php/CPU
  */
 pub struct Cpu {
-	power_on: bool,
-
 	// registers
 	pc: Register<u16>,
 	sp: Register<u8>,
@@ -44,9 +57,12 @@ pub struct Cpu {
 	x: Register<u8>,
 	y: Register<u8>,
 	p: CpuStatusRegister,
+	last_pc: u16,
+	last_opcode: u8,
 
 	// CPU inside RAM
 	ram: Memory,
+	sram_dirty: bool,
 
 	// manage additional stall cycles eg. DMA or branch success
 	stall_cycles: u16,
@@ -1097,14 +1113,16 @@ fn operation(opc: u8) -> Operation {
 impl Cpu {
 	pub fn new(input: Box<dyn Input>, display: Box<dyn Display>, audio: Box<dyn Audio>) -> Self {
 		Cpu {
-			power_on: false,
 			pc: Register::<u16>::new(),
 			sp: Register::<u8>::new(),
 			a: Register::<u8>::new(),
 			x: Register::<u8>::new(),
 			y: Register::<u8>::new(),
 			p: CpuStatusRegister::new(),
+			last_pc: 0,
+			last_opcode: 0,
 			ram: Memory::new(vec![0; 64 * 1024]), // 64KB
+			sram_dirty: false,
 			stall_cycles: 0,
 			input: input,
 			ppu: Ppu::new(display),
@@ -1117,10 +1135,11 @@ impl Cpu {
 
 	pub fn set_rom(&mut self, rom: Rom) {
 		self.rom = rom;
+		self.sram_dirty = false;
+		self.clear_sram();
 	}
 
 	pub fn bootup(&mut self) {
-		self.power_on = true;
 		self.bootup_internal();
 		self.ppu.bootup();
 		self.apu.bootup();
@@ -1150,13 +1169,26 @@ impl Cpu {
 		self.interrupt(Interrupts::RESET);
 	}
 
-	pub fn is_power_on(&self) -> bool {
-		self.power_on
-	}
-
 	fn reset_internal(&mut self) {
 		self.sp.sub(3);
 		self.p.set_i();
+	}
+
+	pub fn debug_state(&self) -> CpuDebugState {
+		CpuDebugState {
+			pc: self.pc.load(),
+			a: self.a.load(),
+			x: self.x.load(),
+			y: self.y.load(),
+			sp: self.sp.load(),
+			p: self.p.load(),
+			last_pc: self.last_pc,
+			last_opcode: self.last_opcode,
+		}
+	}
+
+	pub fn mapper_debug_state(&self) -> crate::mapper::MapperDebugState {
+		self.rom.mapper_debug_state()
 	}
 
 	pub fn get_ppu(&self) -> &Ppu {
@@ -1169,6 +1201,44 @@ impl Cpu {
 
 	pub fn get_mut_input(&mut self) -> &mut Box<dyn Input> {
 		&mut self.input
+	}
+
+	pub fn has_battery_backed_ram(&self) -> bool {
+		self.rom.has_battery_backed_ram()
+	}
+
+	pub fn get_sram(&self) -> Vec<u8> {
+		self.ram.as_slice()[SRAM_START..SRAM_END].to_vec()
+	}
+
+	pub fn set_sram(&mut self, data: &[u8]) {
+		if !self.has_battery_backed_ram() {
+			return;
+		}
+		let slice = self.ram.as_mut_slice();
+		let len = data.len().min(SRAM_SIZE);
+		slice[SRAM_START..SRAM_START + len].copy_from_slice(&data[..len]);
+		if len < SRAM_SIZE {
+			for value in &mut slice[SRAM_START + len..SRAM_END] {
+				*value = 0;
+			}
+		}
+		self.sram_dirty = false;
+	}
+
+	pub fn is_sram_dirty(&self) -> bool {
+		self.sram_dirty
+	}
+
+	pub fn mark_sram_saved(&mut self) {
+		self.sram_dirty = false;
+	}
+
+	fn clear_sram(&mut self) {
+		let slice = self.ram.as_mut_slice();
+		for value in &mut slice[SRAM_START..SRAM_END] {
+			*value = 0;
+		}
 	}
 
 	//
@@ -1212,7 +1282,7 @@ impl Cpu {
 		while let Some((button, event)) = self.input.get_input() {
 			match button {
 				button::Button::Poweroff => {
-					self.power_on = false;
+					// @TODO: Implement
 				},
 				button::Button::Reset => {
 					self.reset();
@@ -1263,7 +1333,10 @@ impl Cpu {
 	}
 
 	fn fetch(&mut self) -> u8 {
-		let opc = self.load(self.pc.load());
+		let pc = self.pc.load();
+		let opc = self.load(pc);
+		self.last_pc = pc;
+		self.last_opcode = opc;
 		self.pc.increment();
 		opc
 	}
@@ -1859,6 +1932,12 @@ impl Cpu {
 		// 0x6000 - 0x7FFF: Battery Backed Save or Work RAM
 
 		if address >= 0x6000 && address < 0x8000 {
+			if self.rom.has_battery_backed_ram() {
+				let current = self.ram.load(address as u32);
+				if current != value {
+					self.sram_dirty = true;
+				}
+			}
 			self.ram.store(address as u32, value);
 		}
 
