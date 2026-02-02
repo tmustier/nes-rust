@@ -319,8 +319,6 @@ impl Ppu {
 				};
 				self.vram_read_buffer = value;
 
-				// @TODO: Support greyscale if needed
-
 				// Accessing ppudata increments vram_address
 				self.increment_vram_address();
 				self.data_bus = return_value;
@@ -1011,7 +1009,7 @@ impl Ppu {
 		// read from the grey column 0x00, 0x10, 0x20, or 0x30
 		let mask = match self.ppumask.is_greyscale() {
 			true => 0x30,
-			false => 0xFF
+			false => 0x3F
 		};
 		PALETTES[(address & mask) as usize] & 0xFFFFFF
 	}
@@ -1066,8 +1064,7 @@ impl PpuControlRegister {
 		self.register.is_bit_set(7)
 	}
 
-	// Bit 6. PPU master/slave select
-	// @TODO: Implement
+	// Bit 6. PPU master/slave select (unused on NES; ignored)
 
 	// Bit 5. Sprite height
 	// -- 0: 8 (8x8 pixels), 1: 16 (8x16 pixels)
