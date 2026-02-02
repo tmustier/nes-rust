@@ -4,14 +4,14 @@
 - Repository: https://github.com/takahirox/nes-rust
 - Upstream state: last known push (per GitHub API) 2020-08-28
 
-## Fork (to be created)
+## Fork
 - Repository: https://github.com/tmustier/nes-rust
 - Purpose: carry project-specific fixes and act as upstream-of-record for this vendor copy.
 
 ## Current Vendor Snapshot
-- Source commit/tag: `<fill-in>`
-- Vendored on: `<fill-in date>`
-- Local patch set: `<fill-in summary or link>`
+- Source commit/tag: `fd5cf3b` (fork master)
+- Vendored on: 2026-02-02
+- Local patch set: SRAM helpers, CHR RAM support, mapper fixes, PPU timing tweaks, debug hooks.
 
 ## Update Process
 1. Sync fork with upstream if needed.
